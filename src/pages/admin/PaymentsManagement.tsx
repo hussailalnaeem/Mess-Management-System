@@ -1,0 +1,1681 @@
+import { useEffect, useMemo, useState } from 'react';
+
+import {
+  Loader2,
+  Plus,
+  RefreshCw,
+  Search,
+  Settings2,
+  CheckCircle2,
+  XCircle,
+  Copy,
+} from 'lucide-react';
+
+import AdminLayout from '../../components/admin/AdminLayout';
+import { supabase } from '../../lib/supabase';
+import { useAuth } from '../../context/AuthContext';
+
+const money = (v: number) =>
+  new Intl.NumberFormat('en-BD', {
+    style: 'currency',
+    currency: 'BDT',
+    maximumFractionDigits: 2,
+  }).format(Number(v || 0));
+
+const monthStart = () => {
+  const d = new Date();
+
+  return `${d.getFullYear()}-${String(
+    d.getMonth() + 1
+  ).padStart(2, '0')}-01`;
+};
+
+export default function PaymentsManagement() {
+  const { profile } = useAuth();
+
+  const [month, setMonth] =
+    useState(monthStart());
+
+  const [rows, setRows] =
+    useState<any[]>([]);
+
+  const [costs, setCosts] =
+    useState<any[]>([]);
+
+  const [rate, setRate] =
+    useState<any>(null);
+
+  const [loading, setLoading] =
+    useState(true);
+
+  const [busy, setBusy] =
+    useState(false);
+
+  const [notification, setNotification] = useState({
+    show: false,
+    type: 'success' as 'success' | 'error' | 'warning',
+    title: '',
+    message: '',
+  });
+
+  const showNotification = (
+    message: string,
+    type: 'success' | 'error' | 'warning' = 'success',
+    title = ''
+  ) => {
+    setNotification({ show: true, type, title, message });
+    window.setTimeout(() => {
+      setNotification((prev) => ({ ...prev, show: false }));
+    }, 3500);
+  };
+
+  const [search, setSearch] =
+    useState('');
+
+  const [cost, setCost] = useState({
+    category: 'rent',
+    description: '',
+    amount: '',
+  });
+
+  const [isDark, setIsDark] =
+    useState(
+      () =>
+        localStorage.getItem(
+          'adminTheme'
+        ) !== 'light'
+    );
+
+  // =========================================================
+  // THEME
+  // =========================================================
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setIsDark(
+        localStorage.getItem(
+          'adminTheme'
+        ) !== 'light'
+      );
+    }, 100);
+
+    return () =>
+      clearInterval(id);
+  }, []);
+
+  // =========================================================
+  // LOAD
+  // =========================================================
+
+  useEffect(() => {
+    if (profile) {
+      load();
+    }
+  }, [profile, month]);
+
+  async function load() {
+    try {
+      setLoading(true);
+
+      const hostel =
+        (profile as any).id;
+
+      const [
+        {
+          data: dues,
+          error: de,
+        },
+
+        {
+          data: members,
+          error: me,
+        },
+
+        {
+          data: r,
+          error: re,
+        },
+
+        {
+          data: c,
+          error: ce,
+        },
+      ] = await Promise.all([
+        supabase
+          .from(
+            'member_payment_summary'
+          )
+          .select('*')
+          .eq(
+            'hostel_id',
+            hostel
+          )
+          .eq(
+            'billing_month',
+            month
+          )
+          .order('balance'),
+
+        supabase
+          .from('members')
+          .select(
+            'id,name,email'
+          )
+          .eq(
+            'hostel_id',
+            hostel
+          ),
+
+        supabase
+          .from(
+            'monthly_meal_rates'
+          )
+          .select('*')
+          .eq(
+            'hostel_id',
+            hostel
+          )
+          .eq(
+            'billing_month',
+            month
+          )
+          .maybeSingle(),
+
+        supabase
+          .from(
+            'monthly_costs'
+          )
+          .select('*')
+          .eq(
+            'hostel_id',
+            hostel
+          )
+          .eq(
+            'billing_month',
+            month
+          )
+          .order(
+            'created_at',
+            {
+              ascending: false,
+            }
+          ),
+      ]);
+
+      if (de) throw de;
+      if (me) throw me;
+      if (re) throw re;
+      if (ce) throw ce;
+
+      const map = new Map(
+        (members || []).map(
+          (m: any) => [
+            m.id,
+            m,
+          ]
+        )
+      );
+
+      setRows(
+        (dues || []).map(
+          (d: any) => ({
+            ...d,
+            member:
+              map.get(
+                d.member_id
+              ),
+          })
+        )
+      );
+
+      setRate(r);
+
+      setCosts(c || []);
+
+    } catch (e: any) {
+
+      console.error(
+        'Finance load error:',
+        e
+      );
+
+      showNotification(
+        e.message || 'Could not load finance data.',
+        'error',
+        'Finance Load Failed'
+      );
+
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // =========================================================
+  // CALCULATE
+  // =========================================================
+
+  async function calculate() {
+    try {
+      setBusy(true);
+
+      const {
+        data,
+        error,
+      } = await supabase.rpc(
+        'calculate_monthly_meal_rate',
+        {
+          p_hostel_id:
+            (profile as any).id,
+
+          p_billing_month:
+            month,
+        }
+      );
+
+      if (error) {
+        throw error;
+      }
+
+      setRate(data);
+
+      const {
+        error: ge,
+      } = await supabase.rpc(
+        'generate_hostel_dues',
+        {
+          p_billing_month:
+            month,
+        }
+      );
+
+      if (ge) {
+        throw ge;
+      }
+
+      showNotification(
+        'Monthly meal rate and member bills recalculated successfully.',
+        'success',
+        'Calculation Complete'
+      );
+
+      await load();
+
+    } catch (e: any) {
+
+      showNotification(
+        e.message || 'Calculation failed.',
+        'error',
+        'Calculation Failed'
+      );
+
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // =========================================================
+  // ADD COST
+  // =========================================================
+
+  async function addCost(
+    e: React.FormEvent
+  ) {
+    e.preventDefault();
+
+    const amount =
+      Number(cost.amount);
+
+    if (
+      !cost.description.trim() ||
+      !Number.isFinite(amount) ||
+      amount < 0
+    ) {
+      showNotification(
+        'Enter a valid description and amount.',
+        'warning',
+        'Invalid Information'
+      );
+
+      return;
+    }
+
+    try {
+      setBusy(true);
+
+      const {
+        data,
+        error,
+      } = await supabase
+        .from('monthly_costs')
+        .insert({
+          hostel_id:
+            (profile as any).id,
+
+          billing_month:
+            month,
+
+          category:
+            cost.category,
+
+          description:
+            cost.description,
+
+          total_amount:
+            amount,
+
+          distribution:
+            'equal',
+        })
+        .select()
+        .single();
+
+      if (error) {
+        throw error;
+      }
+
+      const {
+        error: de,
+      } = await supabase.rpc(
+        'distribute_monthly_cost',
+        {
+          p_cost_id:
+            data.id,
+        }
+      );
+
+      if (de) {
+        throw de;
+      }
+
+      setCost({
+        category: 'rent',
+        description: '',
+        amount: '',
+      });
+
+      await calculate();
+
+    } catch (e: any) {
+
+      showNotification(
+        e.message || 'Could not add cost.',
+        'error',
+        'Cost Addition Failed'
+      );
+
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // =========================================================
+  // VERIFY PAYMENT
+  // =========================================================
+
+  async function verify(
+    id: string,
+    paid: boolean
+  ) {
+    try {
+      setBusy(true);
+
+      const {
+        error,
+      } = await supabase
+        .from(
+          'payment_transactions'
+        )
+        .update({
+          status:
+            paid
+              ? 'paid'
+              : 'failed',
+
+          paid_at:
+            paid
+              ? new Date().toISOString()
+              : null,
+        })
+        .eq(
+          'id',
+          id
+        );
+
+      if (error) {
+        throw error;
+      }
+
+      await load();
+
+      showNotification(
+        paid
+          ? 'The member payment has been approved successfully.'
+          : 'The member payment has been rejected successfully.',
+        paid ? 'success' : 'warning',
+        paid ? 'Payment Approved' : 'Payment Rejected'
+      );
+
+    } catch (e: any) {
+
+      showNotification(
+        e.message || 'Could not update payment.',
+        'error',
+        'Payment Update Failed'
+      );
+
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // =========================================================
+  // SEARCH
+  // =========================================================
+
+  const filtered =
+    rows.filter(
+      (r) =>
+        !search ||
+        r.member?.name
+          ?.toLowerCase()
+          .includes(
+            search.toLowerCase()
+          ) ||
+        r.member?.email
+          ?.toLowerCase()
+          .includes(
+            search.toLowerCase()
+          )
+    );
+
+  // =========================================================
+  // STATS
+  // =========================================================
+
+  const stats =
+    useMemo(
+      () => ({
+        charges:
+          rows.reduce(
+            (s, r) =>
+              s +
+              Number(
+                r.total_due || 0
+              ),
+            0
+          ),
+
+        paid:
+          rows.reduce(
+            (s, r) =>
+              s +
+              Number(
+                r.paid_amount || 0
+              ),
+            0
+          ),
+
+        due:
+          rows.reduce(
+            (s, r) =>
+              s +
+              Math.max(
+                Number(
+                  r.balance || 0
+                ),
+                0
+              ),
+            0
+          ),
+
+        advance:
+          rows.reduce(
+            (s, r) =>
+              s +
+              Math.max(
+                -Number(
+                  r.balance || 0
+                ),
+                0
+              ),
+            0
+          ),
+      }),
+      [rows]
+    );
+
+  // =========================================================
+  // UI
+  // =========================================================
+
+  return (
+    <AdminLayout>
+
+      {notification.show && (
+        <div className="fixed top-6 right-6 z-[99999] w-[380px] max-w-[calc(100vw-2rem)]">
+          <div
+            className={`overflow-hidden rounded-2xl border bg-white shadow-2xl ${
+              notification.type === 'success'
+                ? 'border-emerald-100'
+                : notification.type === 'error'
+                ? 'border-rose-100'
+                : 'border-amber-100'
+            }`}
+            style={{ animation: 'paymentNotificationIn 0.25s ease-out' }}
+          >
+            <div className="flex items-start gap-4 p-5">
+              <div
+                className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${
+                  notification.type === 'success'
+                    ? 'bg-emerald-100'
+                    : notification.type === 'error'
+                    ? 'bg-rose-100'
+                    : 'bg-amber-100'
+                }`}
+              >
+                {notification.type === 'success' ? (
+                  <CheckCircle2 className="h-6 w-6 text-emerald-600" />
+                ) : notification.type === 'error' ? (
+                  <XCircle className="h-6 w-6 text-rose-600" />
+                ) : (
+                  <span className="text-xl">⚠️</span>
+                )}
+              </div>
+
+              <div className="min-w-0 flex-1 pt-0.5">
+                <h3 className="text-[15px] font-bold text-slate-900">
+                  {notification.title ||
+                    (notification.type === 'success'
+                      ? 'Success!'
+                      : notification.type === 'error'
+                      ? 'Error'
+                      : 'Warning')}
+                </h3>
+                <p className="mt-1 text-sm leading-5 text-slate-500">
+                  {notification.message}
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setNotification((prev) => ({ ...prev, show: false }))
+                }
+                className="shrink-0 rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                aria-label="Close notification"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="h-1 bg-slate-100">
+              <div
+                key={`${notification.title}-${notification.message}`}
+                className={`h-full ${
+                  notification.type === 'success'
+                    ? 'bg-emerald-500'
+                    : notification.type === 'error'
+                    ? 'bg-rose-500'
+                    : 'bg-amber-500'
+                }`}
+                style={{ animation: 'paymentNotificationProgress 3.5s linear forwards' }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      <style>{`
+        @keyframes paymentNotificationIn {
+          from { opacity: 0; transform: translateY(-20px) scale(0.96); }
+          to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        @keyframes paymentNotificationProgress {
+          from { width: 100%; }
+          to { width: 0%; }
+        }
+      `}</style>
+
+      <div className="w-full max-w-7xl mx-auto">
+
+        {/* =================================================
+            HEADER
+        ================================================= */}
+
+        <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4 mb-7">
+
+          <div>
+
+            <p className="text-xs font-bold uppercase tracking-widest text-indigo-500">
+              Finance
+            </p>
+
+            <h1
+              className={`
+                text-3xl
+                sm:text-4xl
+                font-extrabold
+                mt-1
+                ${
+                  isDark
+                    ? 'text-white'
+                    : 'text-slate-900'
+                }
+              `}
+            >
+              Payment & Monthly Calculation
+            </h1>
+
+            <p className="text-sm mt-2 text-slate-500">
+              Calculate meal rate, distribute monthly costs and review member balances.
+            </p>
+
+          </div>
+
+          <div className="flex gap-2">
+
+            <input
+              type="month"
+              value={month.slice(0, 7)}
+              onChange={(e) =>
+                setMonth(
+                  `${e.target.value}-01`
+                )
+              }
+              className={`
+                px-4
+                py-2.5
+                rounded-xl
+                border
+
+                ${
+                  isDark
+                    ? 'bg-slate-900/60 border-white/10 text-white [color-scheme:dark]'
+                    : 'bg-white border-slate-200'
+                }
+              `}
+            />
+
+            <button
+              onClick={calculate}
+              disabled={busy}
+              className="
+                inline-flex
+                items-center
+                gap-2
+                px-4
+                py-2.5
+                rounded-xl
+                bg-indigo-600
+                text-white
+                font-bold
+                disabled:opacity-60
+              "
+            >
+
+              {busy ? (
+                <Loader2
+                  className="animate-spin"
+                  size={16}
+                />
+              ) : (
+                <RefreshCw
+                  size={16}
+                />
+              )}
+
+              Calculate
+
+            </button>
+
+          </div>
+
+        </div>
+
+        {/* =================================================
+            STATS
+        ================================================= */}
+
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+
+          <Stat
+            title="Total Charges"
+            value={money(
+              stats.charges
+            )}
+            dark={isDark}
+          />
+
+          <Stat
+            title="Collected"
+            value={money(
+              stats.paid
+            )}
+            dark={isDark}
+          />
+
+          <Stat
+            title="Total Due"
+            value={money(
+              stats.due
+            )}
+            dark={isDark}
+          />
+
+          <Stat
+            title="Total Advance"
+            value={money(
+              stats.advance
+            )}
+            dark={isDark}
+          />
+
+        </div>
+
+        {/* =================================================
+            MEAL RATE + COSTS
+        ================================================= */}
+
+        <div className="grid lg:grid-cols-3 gap-5 mb-6">
+
+          {/* MEAL RATE */}
+
+          <div
+            className={`
+              lg:col-span-1
+              rounded-3xl
+              border
+              p-6
+
+              ${
+                isDark
+                  ? 'bg-slate-800/50 border-white/5'
+                  : 'bg-white border-slate-200'
+              }
+            `}
+          >
+
+            <div className="flex items-center gap-2">
+
+              <Settings2
+                size={18}
+                className="text-indigo-500"
+              />
+
+              <h2
+                className={`
+                  font-bold
+                  ${
+                    isDark
+                      ? 'text-white'
+                      : 'text-slate-900'
+                  }
+                `}
+              >
+                Calculated Meal Rate
+              </h2>
+
+            </div>
+
+            <p className="text-xs text-slate-500 mt-3">
+              Total Bazar ÷ Total Actual Meals
+            </p>
+
+            <p className="text-4xl font-black text-indigo-500 mt-2">
+              {money(
+                rate?.meal_rate || 0
+              )}
+            </p>
+
+            <div className="grid grid-cols-2 gap-3 mt-5">
+
+              <Stat
+                title="Bazar"
+                value={money(
+                  rate?.total_bazar || 0
+                )}
+                dark={isDark}
+              />
+
+              <Stat
+                title="Meals"
+                value={String(
+                  rate?.total_meals || 0
+                )}
+                dark={isDark}
+              />
+
+            </div>
+
+          </div>
+
+          {/* ADD COST */}
+
+          <form
+            onSubmit={addCost}
+            className={`
+              lg:col-span-2
+              rounded-3xl
+              border
+              p-6
+
+              ${
+                isDark
+                  ? 'bg-slate-800/50 border-white/5'
+                  : 'bg-white border-slate-200'
+              }
+            `}
+          >
+
+            <h2
+              className={`
+                font-bold
+                ${
+                  isDark
+                    ? 'text-white'
+                    : 'text-slate-900'
+                }
+              `}
+            >
+              Add Monthly Rent / Utility / Other
+            </h2>
+
+            <div className="grid sm:grid-cols-3 gap-3 mt-4">
+
+              <select
+                value={
+                  cost.category
+                }
+                onChange={(e) =>
+                  setCost({
+                    ...cost,
+                    category:
+                      e.target.value,
+                  })
+                }
+                className={`
+                  rounded-xl
+                  border
+                  px-3
+                  py-3
+
+                  ${
+                    isDark
+                      ? 'bg-slate-900/60 border-white/10 text-white'
+                      : 'bg-slate-50 border-slate-200'
+                  }
+                `}
+              >
+
+                <option value="rent">
+                  House Rent
+                </option>
+
+                <option value="utility">
+                  Utility
+                </option>
+
+                <option value="other">
+                  Other
+                </option>
+
+              </select>
+
+              <input
+                value={
+                  cost.description
+                }
+                onChange={(e) =>
+                  setCost({
+                    ...cost,
+                    description:
+                      e.target.value,
+                  })
+                }
+                placeholder="Electricity / Rent / Gas..."
+                className={`
+                  rounded-xl
+                  border
+                  px-3
+                  py-3
+
+                  ${
+                    isDark
+                      ? 'bg-slate-900/60 border-white/10 text-white'
+                      : 'bg-slate-50 border-slate-200'
+                  }
+                `}
+              />
+
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={
+                  cost.amount
+                }
+                onChange={(e) =>
+                  setCost({
+                    ...cost,
+                    amount:
+                      e.target.value,
+                  })
+                }
+                placeholder="Amount"
+                className={`
+                  rounded-xl
+                  border
+                  px-3
+                  py-3
+
+                  ${
+                    isDark
+                      ? 'bg-slate-900/60 border-white/10 text-white'
+                      : 'bg-slate-50 border-slate-200'
+                  }
+                `}
+              />
+
+            </div>
+
+            <button
+              type="submit"
+              disabled={busy}
+              className="
+                mt-3
+                inline-flex
+                items-center
+                gap-2
+                px-4
+                py-2.5
+                rounded-xl
+                bg-slate-900
+                text-white
+                font-bold
+                disabled:opacity-60
+              "
+            >
+
+              {busy ? (
+                <Loader2
+                  size={16}
+                  className="animate-spin"
+                />
+              ) : (
+                <Plus size={16} />
+              )}
+
+              Add & Equal Distribute
+
+            </button>
+
+            <div className="mt-4 space-y-2">
+
+              {costs.map(
+                (c) => (
+
+                  <div
+                    key={c.id}
+                    className="
+                      flex
+                      justify-between
+                      text-sm
+                      rounded-xl
+                      px-3
+                      py-2
+                      bg-slate-500/5
+                    "
+                  >
+
+                    <span>
+
+                      {c.description}{' '}
+
+                      <span className="text-xs text-slate-500">
+                        ({c.category})
+                      </span>
+
+                    </span>
+
+                    <b>
+                      {money(
+                        c.total_amount
+                      )}
+                    </b>
+
+                  </div>
+
+                )
+              )}
+
+            </div>
+
+          </form>
+
+        </div>
+
+        {/* =================================================
+            SEARCH
+        ================================================= */}
+
+        <div
+          className={`
+            rounded-3xl
+            border
+            p-4
+            mb-5
+
+            ${
+              isDark
+                ? 'bg-slate-800/50 border-white/5'
+                : 'bg-white border-slate-200'
+            }
+          `}
+        >
+
+          <div className="relative">
+
+            <Search
+              size={17}
+              className="
+                absolute
+                left-4
+                top-1/2
+                -translate-y-1/2
+                text-slate-500
+              "
+            />
+
+            <input
+              value={search}
+              onChange={(e) =>
+                setSearch(
+                  e.target.value
+                )
+              }
+              placeholder="Search member..."
+              className={`
+                w-full
+                pl-11
+                pr-4
+                py-3
+                rounded-xl
+                border
+
+                ${
+                  isDark
+                    ? 'bg-slate-900/60 border-white/10 text-white'
+                    : 'bg-slate-50 border-slate-200'
+                }
+              `}
+            />
+
+          </div>
+
+        </div>
+
+        {/* =================================================
+            MEMBERS TABLE
+        ================================================= */}
+
+        <div
+          className={`
+            rounded-3xl
+            border
+            overflow-hidden
+
+            ${
+              isDark
+                ? 'bg-slate-800/50 border-white/5'
+                : 'bg-white border-slate-200 shadow-sm'
+            }
+          `}
+        >
+
+          {loading ? (
+
+            <div className="p-12 flex justify-center">
+
+              <Loader2
+                className="
+                  animate-spin
+                  text-indigo-500
+                "
+              />
+
+            </div>
+
+          ) : (
+
+            <div className="overflow-x-auto">
+
+              <table className="w-full min-w-[1100px] text-left">
+
+                <thead>
+
+                  <tr
+                    className={
+                      isDark
+                        ? 'bg-slate-900/50'
+                        : 'bg-slate-50'
+                    }
+                  >
+
+                    <th className="px-5 py-4 text-xs uppercase tracking-widest text-slate-500">
+                      Member
+                    </th>
+
+                    <th className="px-5 py-4 text-xs uppercase tracking-widest text-slate-500">
+                      Meal
+                    </th>
+
+                    <th className="px-5 py-4 text-xs uppercase tracking-widest text-slate-500">
+                      Other / Rent / Utility
+                    </th>
+
+                    <th className="px-5 py-4 text-xs uppercase tracking-widest text-slate-500">
+                      Total
+                    </th>
+
+                    <th className="px-5 py-4 text-xs uppercase tracking-widest text-slate-500">
+                      Paid
+                    </th>
+
+                    <th className="px-5 py-4 text-xs uppercase tracking-widest text-slate-500">
+                      Balance
+                    </th>
+
+                    <th className="px-5 py-4 text-xs uppercase tracking-widest text-slate-500">
+                      Payment Request
+                    </th>
+
+                  </tr>
+
+                </thead>
+
+                <tbody
+                  className={`
+                    divide-y
+                    ${
+                      isDark
+                        ? 'divide-white/5'
+                        : 'divide-slate-100'
+                    }
+                  `}
+                >
+
+                  {filtered.map(
+                    (r) => (
+
+                      <tr key={r.id}>
+
+                        <td
+                          className={`
+                            px-5
+                            py-4
+                            text-sm
+                            font-semibold
+                            ${
+                              isDark
+                                ? 'text-white'
+                                : 'text-slate-900'
+                            }
+                          `}
+                        >
+
+                          {r.member?.name}
+
+                          <div className="text-xs text-slate-500 font-normal">
+                            {r.member?.email}
+                          </div>
+
+                        </td>
+
+                        <td className="px-5 py-4 text-sm text-slate-400">
+                          {money(
+                            r.meal_charge
+                          )}
+                        </td>
+
+                        <td className="px-5 py-4 text-sm text-slate-400">
+                          {money(
+                            r.other_charge
+                          )}
+                        </td>
+
+                        <td className="px-5 py-4 text-sm font-bold text-slate-300">
+                          {money(
+                            r.total_due
+                          )}
+                        </td>
+
+                        <td className="px-5 py-4 text-sm text-emerald-500">
+                          {money(
+                            r.paid_amount
+                          )}
+                        </td>
+
+                        <td
+                          className={`
+                            px-5
+                            py-4
+                            text-sm
+                            font-black
+                            ${
+                              Number(
+                                r.balance
+                              ) < 0
+                                ? 'text-emerald-500'
+                                : 'text-rose-500'
+                            }
+                          `}
+                        >
+
+                          {Number(
+                            r.balance
+                          ) < 0
+
+                            ? `Advance ${money(
+                                Math.abs(
+                                  r.balance
+                                )
+                              )}`
+
+                            : Number(
+                                r.balance
+                              ) > 0
+
+                            ? `Due ${money(
+                                r.balance
+                              )}`
+
+                            : 'Settled'}
+
+                        </td>
+
+                        <td className="px-5 py-4 text-sm">
+
+                          <PaymentRequests
+                            memberId={
+                              r.member_id
+                            }
+                            verify={
+                              verify
+                            }
+                            disabled={
+                              busy
+                            }
+                            isDark={
+                              isDark
+                            }
+                          />
+
+                        </td>
+
+                      </tr>
+
+                    )
+                  )}
+
+                </tbody>
+
+              </table>
+
+            </div>
+
+          )}
+
+        </div>
+
+      </div>
+
+    </AdminLayout>
+  );
+}
+
+// ===========================================================
+// PAYMENT REQUESTS
+// ===========================================================
+
+function PaymentRequests({
+  memberId,
+  verify,
+  disabled,
+  isDark,
+}: {
+  memberId: string;
+
+  verify: (
+    id: string,
+    paid: boolean
+  ) => Promise<void>;
+
+  disabled: boolean;
+
+  isDark: boolean;
+}) {
+
+  const [items, setItems] =
+    useState<any[]>([]);
+
+  useEffect(() => {
+
+    let mounted = true;
+
+    supabase
+      .from(
+        'payment_transactions'
+      )
+      .select(`
+        id,
+        amount,
+        payment_method,
+        provider,
+        status,
+        transaction_id,
+        created_at
+      `)
+      .eq(
+        'member_id',
+        memberId
+      )
+      .eq(
+        'status',
+        'pending'
+      )
+      .order(
+        'created_at',
+        {
+          ascending: false,
+        }
+      )
+      .then(
+        ({
+          data,
+          error,
+        }) => {
+
+          if (
+            !error &&
+            mounted
+          ) {
+            setItems(
+              data || []
+            );
+          }
+
+        }
+      );
+
+    return () => {
+      mounted = false;
+    };
+
+  }, [memberId]);
+
+  if (!items.length) {
+    return (
+      <span className="text-xs text-slate-500">
+        No pending
+      </span>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+
+      {items
+        .slice(0, 3)
+        .map((p) => (
+
+          <div
+            key={p.id}
+            className={`
+              rounded-xl
+              border
+              p-3
+
+              ${
+                isDark
+                  ? 'bg-slate-900/40 border-white/5'
+                  : 'bg-slate-50 border-slate-200'
+              }
+            `}
+          >
+
+            {/* AMOUNT */}
+
+            <div className="flex items-center justify-between">
+
+              <div>
+
+                <p className="text-[10px] uppercase tracking-widest text-slate-500">
+                  Payment
+                </p>
+
+                <p className="font-bold text-sm mt-1">
+                  {money(
+                    p.amount
+                  )}
+                </p>
+
+              </div>
+
+              <span
+                className="
+                  px-2
+                  py-1
+                  rounded-full
+                  text-[10px]
+                  font-bold
+                  bg-amber-500/10
+                  text-amber-500
+                "
+              >
+                Pending
+              </span>
+
+            </div>
+
+            {/* METHOD */}
+
+            <div className="mt-2">
+
+              <p className="text-[10px] uppercase tracking-widest text-slate-500">
+                Method
+              </p>
+
+              <p className="text-xs font-semibold mt-1">
+                {p.payment_method ||
+                  '-'}
+              </p>
+
+            </div>
+
+            {/* =================================================
+                TRANSACTION ID
+            ================================================= */}
+
+            <div
+              className={`
+                mt-3
+                rounded-lg
+                p-3
+                ${
+                  isDark
+                    ? 'bg-indigo-500/10'
+                    : 'bg-indigo-50'
+                }
+              `}
+            >
+
+              <p className="text-[10px] uppercase tracking-widest font-bold text-indigo-500">
+                Transaction ID
+              </p>
+
+              <p
+                className="
+                  mt-1
+                  text-xs
+                  font-mono
+                  font-bold
+                  text-indigo-500
+                  break-all
+                "
+              >
+                {p.transaction_id ||
+                  'N/A'}
+              </p>
+
+            </div>
+
+            {/* DATE */}
+
+            <p className="text-[10px] text-slate-500 mt-2">
+              Submitted:{' '}
+              {p.created_at
+                ? new Date(
+                    p.created_at
+                  ).toLocaleString(
+                    'en-BD'
+                  )
+                : '-'}
+            </p>
+
+            {/* ACTIONS */}
+
+            <div className="flex gap-2 mt-3">
+
+              <button
+                type="button"
+                disabled={
+                  disabled
+                }
+                onClick={() =>
+                  verify(
+                    p.id,
+                    true
+                  )
+                }
+                className="
+                  flex-1
+                  inline-flex
+                  items-center
+                  justify-center
+                  gap-1
+                  px-3
+                  py-2
+                  rounded-lg
+                  bg-emerald-500/10
+                  text-emerald-500
+                  font-bold
+                  text-xs
+                  disabled:opacity-50
+                "
+              >
+
+                <CheckCircle2
+                  size={15}
+                />
+
+                Approve
+
+              </button>
+
+              <button
+                type="button"
+                disabled={
+                  disabled
+                }
+                onClick={() =>
+                  verify(
+                    p.id,
+                    false
+                  )
+                }
+                className="
+                  flex-1
+                  inline-flex
+                  items-center
+                  justify-center
+                  gap-1
+                  px-3
+                  py-2
+                  rounded-lg
+                  bg-rose-500/10
+                  text-rose-500
+                  font-bold
+                  text-xs
+                  disabled:opacity-50
+                "
+              >
+
+                <XCircle
+                  size={15}
+                />
+
+                Reject
+
+              </button>
+
+            </div>
+
+          </div>
+
+        ))}
+
+    </div>
+  );
+}
+
+// ===========================================================
+// STAT
+// ===========================================================
+
+function Stat({
+  title,
+  value,
+  dark,
+}: {
+  title: string;
+  value: string;
+  dark: boolean;
+}) {
+
+  return (
+    <div
+      className={`
+        rounded-2xl
+        p-3
+
+        ${
+          dark
+            ? 'bg-white/[0.03]'
+            : 'bg-slate-50'
+        }
+      `}
+    >
+
+      <p className="text-[10px] uppercase tracking-widest font-bold text-slate-500">
+        {title}
+      </p>
+
+      <p
+        className={`
+          text-sm
+          font-bold
+          mt-1
+
+          ${
+            dark
+              ? 'text-slate-200'
+              : 'text-slate-800'
+          }
+        `}
+      >
+        {value}
+      </p>
+
+    </div>
+  );
+}
